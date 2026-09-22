@@ -1,2 +1,138 @@
 <!DOCTYPE html>
-<html><head><meta charset="UTF-8"><title>QR Code Generator</title><link rel="stylesheet" href="style.css"></head><body><div class="container"><h1>📱 QR Code Generator</h1><div class="input-section"><input type="text" id="textInput" placeholder="Enter text or URL..."/><button id="generateBtn">Generate QR</button></div><div id="qrContainer" class="qr-container"></div><button id="downloadBtn" style="display:none; width:100%; padding:10px; background:#28a745; color:white; border:none; cursor:pointer; border-radius:5px;">Download QR Code</button></div><script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></ script><script src="script.js"></ script></body></html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Picture QR</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,560;9..144,650&family=Outfit:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <p class="eyebrow">Picture QR</p>
+      <h1>A QR code that is part of the picture.</h1>
+      <p class="lede">Type a link or some text and add a picture. The picture is redrawn as a fine dot pattern and the code is woven into it, so the two read as one image. Everything runs in your browser.</p>
+    </header>
+
+    <div class="layout">
+      <section class="card controls" aria-label="QR settings">
+        <label class="field" for="textInput">
+          <span class="label">Link or text</span>
+          <textarea id="textInput" rows="3" spellcheck="false" placeholder="https://example.com or any message"></textarea>
+        </label>
+
+        <div class="field">
+          <span class="label">Picture</span>
+          <div id="dropzone" class="dropzone" role="button" aria-label="Choose a picture">
+            <div id="dropEmpty">
+              <span class="drop-mark" aria-hidden="true"></span>
+              <p class="drop-title">Drop a picture here</p>
+              <p class="muted">PNG, JPG, or WEBP</p>
+            </div>
+            <div id="dropFilled" class="drop-filled" hidden>
+              <img id="thumb" alt="Selected picture">
+              <div>
+                <p id="fileName" class="file-name"></p>
+                <p class="muted">Click to replace</p>
+              </div>
+            </div>
+          </div>
+          <div class="action-row">
+            <button type="button" id="browseBtn" class="ghost">Upload picture</button>
+            <button type="button" id="sampleBtn" class="ghost">Use sample</button>
+            <button type="button" id="removeBtn" class="ghost danger" hidden>Remove</button>
+          </div>
+          <input id="fileInput" type="file" accept="image/png,image/jpeg,image/webp,image/gif,image/bmp" hidden>
+        </div>
+
+        <div id="pictureOptions" class="picture-options is-locked">
+          <fieldset class="field">
+            <legend>How the picture is used</legend>
+            <div class="choices">
+              <label class="choice">
+                <input type="radio" name="style" value="inside" checked>
+                <span>
+                  <strong>QR inside the picture</strong>
+                  <small>The whole picture becomes a dot drawing and a small or medium code is woven into it.</small>
+                </span>
+              </label>
+              <label class="choice">
+                <input type="radio" name="style" value="like">
+                <span>
+                  <strong>Looks like the picture</strong>
+                  <small>The whole code is the picture. Every dot of the drawing is part of the code.</small>
+                </span>
+              </label>
+            </div>
+          </fieldset>
+
+          <fieldset class="field">
+            <legend>Size</legend>
+            <div class="segment" role="radiogroup" aria-label="Size">
+              <label>
+                <input type="radio" name="size" value="small" checked>
+                <span>Small</span>
+              </label>
+              <label>
+                <input type="radio" name="size" value="medium">
+                <span>Medium</span>
+              </label>
+            </div>
+            <p id="sizeHint" class="field-hint">Add a picture to choose small or medium.</p>
+          </fieldset>
+
+          <div class="option-grid">
+            <fieldset class="field" id="positionField">
+              <legend>Position</legend>
+              <select id="position" class="select" aria-label="Position of the code in the picture">
+                <option value="center">Centre</option>
+                <option value="top-left">Top left</option>
+                <option value="top-right">Top right</option>
+                <option value="bottom-left">Bottom left</option>
+                <option value="bottom-right">Bottom right</option>
+              </select>
+            </fieldset>
+
+            <fieldset class="field">
+              <legend>Ink</legend>
+              <div class="segment" role="radiogroup" aria-label="Ink">
+                <label>
+                  <input type="radio" name="ink" value="mono" checked>
+                  <span>Black &amp; white</span>
+                </label>
+                <label>
+                  <input type="radio" name="ink" value="color">
+                  <span>Picture colours</span>
+                </label>
+              </div>
+            </fieldset>
+          </div>
+        </div>
+
+        <p id="status" class="status" role="status"></p>
+        <button type="button" id="generateBtn" class="primary">Create QR code</button>
+      </section>
+
+      <section class="card preview" aria-label="QR preview">
+        <div class="preview-head">
+          <h2>Preview</h2>
+          <p id="previewMeta">Waiting for text</p>
+        </div>
+        <div id="stage" class="stage">
+          <canvas id="qrCanvas" hidden role="img" aria-label="Generated QR code"></canvas>
+          <p id="empty" class="empty">Your code will appear here.</p>
+        </div>
+        <p id="encoded" class="encoded"></p>
+        <button type="button" id="downloadBtn" class="download" disabled>Download PNG</button>
+        <p class="tip">The download is a large PNG. Picture codes are made of fine dots, so show or print them big and let the camera see the whole code.</p>
+      </section>
+    </div>
+  </main>
+  <script src="lib/qrcode.min.js"></script>
+  <script src="halftone.js"></script>
+  <script src="script.js"></script>
+</body>
+</html>
