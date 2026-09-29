@@ -204,6 +204,8 @@ textarea:focus {
   border-radius: 999px;
 }
 
+.segment-3 { grid-template-columns: 1fr 1fr 1fr; }
+
 .segment label { position: relative; }
 
 .segment input {

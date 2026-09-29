@@ -55,15 +55,15 @@
               <label class="choice">
                 <input type="radio" name="style" value="inside" checked>
                 <span>
-                  <strong>QR inside the picture</strong>
-                  <small>The whole picture becomes a dot drawing and a small or medium code is woven into it.</small>
+                  <strong>Hidden in the picture</strong>
+                  <small>The picture keeps its shape. The code sits inside the silhouette, made of the same dots, so you see the picture rather than a code.</small>
                 </span>
               </label>
               <label class="choice">
                 <input type="radio" name="style" value="like">
                 <span>
                   <strong>Looks like the picture</strong>
-                  <small>The whole code is the picture. Every dot of the drawing is part of the code.</small>
+                  <small>The whole code is the picture. The picture sits inside the code and every dot belongs to the code.</small>
                 </span>
               </label>
             </div>
@@ -84,16 +84,33 @@
             <p id="sizeHint" class="field-hint">Add a picture to choose small or medium.</p>
           </fieldset>
 
+          <fieldset class="field" id="hidingField">
+            <legend>Hiding</legend>
+            <div class="segment segment-3" role="radiogroup" aria-label="How well the code is hidden">
+              <label>
+                <input type="radio" name="hiding" value="easy">
+                <span>Easy to scan</span>
+              </label>
+              <label>
+                <input type="radio" name="hiding" value="balanced" checked>
+                <span>Balanced</span>
+              </label>
+              <label>
+                <input type="radio" name="hiding" value="hidden">
+                <span>Well hidden</span>
+              </label>
+            </div>
+            <p id="hidingHint" class="field-hint"></p>
+          </fieldset>
+
           <div class="option-grid">
-            <fieldset class="field" id="positionField">
-              <legend>Position</legend>
-              <select id="position" class="select" aria-label="Position of the code in the picture">
-                <option value="center">Centre</option>
-                <option value="top-left">Top left</option>
-                <option value="top-right">Top right</option>
-                <option value="bottom-left">Bottom left</option>
-                <option value="bottom-right">Bottom right</option>
+            <fieldset class="field">
+              <legend>Silhouette</legend>
+              <select id="silhouette" class="select" aria-label="How the picture's shape is found">
+                <option value="auto">Find it automatically</option>
+                <option value="whole">Use the whole picture</option>
               </select>
+              <p class="field-hint">Transparent PNGs use their transparency. Otherwise the plain colour around the edges counts as background.</p>
             </fieldset>
 
             <fieldset class="field">

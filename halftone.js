@@ -3,8 +3,16 @@
  *
  * Every QR module is drawn as a 3 x 3 block of sub-pixels. Only the centre
  * sub-pixel has to match the module's bit, so the eight around it are free to
- * carry a dithered rendering of a picture. Finder, timing, alignment, format
- * and version patterns are drawn solid so scanners can lock on to the code.
+ * carry a dithered rendering of a picture. Only the finder and alignment
+ * patterns are drawn solid, because scanners use them to locate the code;
+ * every other module (data, timing, format, version) is a centre dot.
+ *
+ * Two styles:
+ *   "inside" - the picture keeps its shape. The code is placed in a square
+ *              inside the picture's silhouette, in the spot whose tone and
+ *              texture hide it best, and only the silhouette is drawn.
+ *   "like"   - the whole code is the picture: the picture is placed inside the
+ *              code and every dot belongs to the code.
  *
  * The module is environment-neutral: it takes a `sample(width, height)`
  * callback that returns the picture resized to the requested size as an
@@ -32,37 +40,49 @@
     [6, 26, 54, 82, 110, 138, 166], [6, 30, 58, 86, 114, 142, 170]
   ];
 
-  const SUB = 3;                 // sub-pixels per module side
-  const QUIET = 4;               // quiet-zone width in modules
-  const LEVEL = "H";             // error correction: 30% recoverable
-  const LIKE_VERSION = 25;       // 117 modules -> 351 picture pixels across
+  const SUB = 3;                   // sub-pixels per module side
+  const LEVEL = "H";               // error correction: 30% recoverable
+  const LIKE_VERSION = 25;         // 117 modules -> 351 picture pixels across
+  const ANALYSIS_SHORT_SIDE = 150; // resolution used to find the silhouette
+
   // Tunable rendering constants (exposed as HalftoneQR.config).
   const config = {
-    insideShortSide: 300,// target picture resolution in "inside" mode (sub-pixels)
-    neighbourBias: 0.2,  // pull the 4 sub-pixels around a centre dot toward its bit (0..1)
-    gamma: 1.6,          // tone curve applied before dithering
-    centreError: 0.55,   // how much of a forced centre dot's error is diffused
-    ringInner: 1,        // lightening right next to the code (1 = pure white)
-    ringOuterLike: 0.86, // lightening at the picture edge in "like" mode
-    ringOuterInside: 0.8, // lightening at the outer edge of the ring in "inside" mode
-    featherModules: 2    // how far the ring fades into the picture (modules)
-  };
-
-  const STYLES = {
-    inside: {
-      small: { span: 0.44 },
-      medium: { span: 0.64 }
+    targetShortSide: 320,    // picture resolution aimed for in "inside" mode (sub-pixels)
+    maxShortSide: 900,       // never dither finer than this
+    hiding: { easy: 1, balanced: 1.7, hidden: 2.5 }, // module-count multipliers per hiding level
+    placement: {             // scoring of candidate code positions in "inside" mode
+      centre: 1.2,           //   penalty per (distance to the shape's centre / short side)
+      blank: 2,              //   penalty per fraction of blank (near-white) pixels under the code
+      tone: 0.5,             //   penalty per luminance distance from `idealTone`
+      texture: 0.3,          //   reward per unit of local texture (standard deviation)
+      idealTone: 0.45,       //   luminance the code blends into best (0 black .. 1 white)
+      blankTone: 0.9,        //   luminance above which a pixel counts as blank
+      cornerPatch: 0.22,     //   corner patch size (share of the code side) that must not be blank
+      cornerBlankMax: 0.25,  //   corners with more blank than this are avoided
+      cornerPenalty: 3       //   penalty when a corner is blank
     },
-    like: {
-      small: { picture: 0.7 },
-      medium: { picture: 1 }
-    }
+    quietLike: 4,            // quiet-zone modules around the code in "like" mode
+    quietInside: 1,          // light-ring modules around the code in "inside" mode
+    ringFinderOnly: true,    // "inside": lighten only beside the finder squares, not the whole edge
+    solidAllAlignment: false, // "inside": draw every alignment pattern solid (false: bottom-right only)
+    neighbourBias: 0.2,      // pull the 4 sub-pixels around a centre dot toward its bit (0..1)
+    gamma: 1.6,              // tone curve applied before dithering
+    centreError: 0.55,       // how much of a forced centre dot's error is diffused
+    ringInner: 1,            // lightening right next to the code (1 = pure white)
+    ringOuterLike: 0.86,     // lightening at the picture edge in "like" mode
+    ringOuterInside: 0.8,    // lightening at the outer edge of the ring in "inside" mode
+    featherModules: 1,       // how far the ring fades into the picture (modules)
+    backgroundTolerance: 48, // RGB distance from the edge colour still counted as background
+    minSilhouette: 0.08,     // silhouettes covering less than this are ignored
+    maxSilhouette: 0.97,     // silhouettes covering more than this are ignored
+    minSquare: 0.22          // below this share of the short side the code spans the shape instead
   };
 
-  const INK = {
-    dark: 0.2,    // dark dots keep 20% of the picture colour
-    light: 0.12   // light dots keep 12% of the picture colour
-  };
+  const SHARE = { small: 0.68, medium: 0.92 };     // share of the largest inscribed square used by the code
+  const LIKE_PICTURE = { small: 0.7, medium: 1 };  // share of the code covered by the picture
+  const INK = { dark: 0.2, light: 0.12 };          // how much picture colour the dots keep
+
+  /* ---------- QR helpers ---------- */
 
   function versionFor(qrcode, text) {
     const probe = qrcode(0, LEVEL);
@@ -78,22 +98,23 @@
     return code;
   }
 
-  function functionMap(version) {
+  /*
+   * Modules that must be drawn solid: finder patterns with their separators,
+   * and alignment patterns. Decoders only use the bottom-right alignment
+   * pattern, so `allAlignment` false keeps just that one solid.
+   */
+  function solidMap(version, allAlignment) {
     const M = version * 4 + 17;
     const map = new Uint8Array(M * M);
     const mark = (r, c) => {
       if (r >= 0 && c >= 0 && r < M && c < M) map[r * M + c] = 1;
     };
-    for (let r = 0; r < 9; r += 1) {
-      for (let c = 0; c < 9; c += 1) {
+    for (let r = 0; r < 8; r += 1) {
+      for (let c = 0; c < 8; c += 1) {
         mark(r, c);
-        if (c < 8) mark(r, M - 1 - c);
-        if (r < 8) mark(M - 1 - r, c);
+        mark(r, M - 1 - c);
+        mark(M - 1 - r, c);
       }
-    }
-    for (let i = 8; i < M - 8; i += 1) {
-      mark(6, i);
-      mark(i, 6);
     }
     const positions = ALIGNMENT[version - 1] || [];
     const last = positions[positions.length - 1];
@@ -102,21 +123,345 @@
         const pr = positions[i];
         const pc = positions[j];
         if ((pr === 6 && pc === 6) || (pr === 6 && pc === last) || (pr === last && pc === 6)) continue;
+        if (!allAlignment && !(pr === last && pc === last)) continue;
         for (let dr = -2; dr <= 2; dr += 1) {
           for (let dc = -2; dc <= 2; dc += 1) mark(pr + dr, pc + dc);
         }
       }
     }
-    if (version >= 7) {
-      for (let a = 0; a < 6; a += 1) {
-        for (let b = 0; b < 3; b += 1) {
-          mark(a, M - 11 + b);
-          mark(M - 11 + b, a);
+    return map;
+  }
+
+  /* ---------- silhouette analysis ---------- */
+
+  function floodFrom(seedTest, passable, width, height) {
+    const visited = new Uint8Array(width * height);
+    const queue = new Int32Array(width * height);
+    let head = 0;
+    let tail = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const idx = y * width + x;
+        if (seedTest(x, y) && passable(idx)) {
+          visited[idx] = 1;
+          queue[tail++] = idx;
         }
       }
     }
-    return map;
+    while (head < tail) {
+      const idx = queue[head++];
+      const x = idx % width;
+      const y = (idx - x) / width;
+      if (x > 0 && !visited[idx - 1] && passable(idx - 1)) { visited[idx - 1] = 1; queue[tail++] = idx - 1; }
+      if (x < width - 1 && !visited[idx + 1] && passable(idx + 1)) { visited[idx + 1] = 1; queue[tail++] = idx + 1; }
+      if (y > 0 && !visited[idx - width] && passable(idx - width)) { visited[idx - width] = 1; queue[tail++] = idx - width; }
+      if (y < height - 1 && !visited[idx + width] && passable(idx + width)) { visited[idx + width] = 1; queue[tail++] = idx + width; }
+    }
+    return visited;
   }
+
+  function isBorder(x, y, width, height, band) {
+    return x < band || y < band || x >= width - band || y >= height - band;
+  }
+
+  function removeSpecks(mask, width, height, minArea) {
+    const seen = new Uint8Array(width * height);
+    const queue = new Int32Array(width * height);
+    for (let start = 0; start < mask.length; start += 1) {
+      if (!mask[start] || seen[start]) continue;
+      let head = 0;
+      let tail = 0;
+      queue[tail++] = start;
+      seen[start] = 1;
+      while (head < tail) {
+        const idx = queue[head++];
+        const x = idx % width;
+        const y = (idx - x) / width;
+        const next = [idx - 1, idx + 1, idx - width, idx + width];
+        const ok = [x > 0, x < width - 1, y > 0, y < height - 1];
+        for (let k = 0; k < 4; k += 1) {
+          const n = next[k];
+          if (ok[k] && mask[n] && !seen[n]) {
+            seen[n] = 1;
+            queue[tail++] = n;
+          }
+        }
+      }
+      if (tail < minArea) {
+        for (let i = 0; i < tail; i += 1) mask[queue[i]] = 0;
+      }
+    }
+  }
+
+  /* Largest inscribed square of a binary mask, plus the per-pixel "largest square ending here" table. */
+  function largestSquare(mask, width, height) {
+    const side = new Int32Array(width * height);
+    let sumX = 0;
+    let sumY = 0;
+    let area = 0;
+    for (let i = 0; i < mask.length; i += 1) {
+      if (mask[i]) {
+        area += 1;
+        sumX += i % width;
+        sumY += Math.floor(i / width);
+      }
+    }
+    const cx = area ? sumX / area : width / 2;
+    const cy = area ? sumY / area : height / 2;
+    let best = 0;
+    let bestX = 0;
+    let bestY = 0;
+    let bestDist = Infinity;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const idx = y * width + x;
+        if (!mask[idx]) continue;
+        let s = 1;
+        if (x > 0 && y > 0) {
+          s = Math.min(side[idx - 1], side[idx - width], side[idx - width - 1]) + 1;
+        }
+        side[idx] = s;
+        const dist = Math.hypot(x - s / 2 - cx, y - s / 2 - cy);
+        if (s > best || (s === best && dist < bestDist)) {
+          best = s;
+          bestX = x - s + 1;
+          bestY = y - s + 1;
+          bestDist = dist;
+        }
+      }
+    }
+    return { square: { x: bestX, y: bestY, side: best }, side };
+  }
+
+  function boundingBox(mask, width, height) {
+    let x0 = width;
+    let y0 = height;
+    let x1 = -1;
+    let y1 = -1;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        if (!mask[y * width + x]) continue;
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+    return { x: x0, y: y0, width: x1 - x0 + 1, height: y1 - y0 + 1 };
+  }
+
+  function blurMask(mask, width, height) {
+    const out = new Float32Array(width * height);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        let sum = 0;
+        let n = 0;
+        for (let dy = -1; dy <= 1; dy += 1) {
+          for (let dx = -1; dx <= 1; dx += 1) {
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= width || yy >= height) continue;
+            sum += mask[yy * width + xx];
+            n += 1;
+          }
+        }
+        out[y * width + x] = sum / n;
+      }
+    }
+    return out;
+  }
+
+  function luminancePlane(image) {
+    const { width, height, data } = image;
+    const gray = new Float32Array(width * height);
+    for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
+      const a = data[p + 3] / 255;
+      const r = data[p] * a + 255 * (1 - a);
+      const g = data[p + 1] * a + 255 * (1 - a);
+      const b = data[p + 2] * a + 255 * (1 - a);
+      gray[i] = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
+    }
+    return gray;
+  }
+
+  /*
+   * Finds the picture's silhouette at a small analysis resolution.
+   * mode: "auto" (alpha channel, else plain background at the edges) | "whole"
+   */
+  function analyse(sample, aspect, mode) {
+    let width;
+    let height;
+    if (aspect >= 1) {
+      height = ANALYSIS_SHORT_SIDE;
+      width = Math.max(1, Math.round(height * aspect));
+    } else {
+      width = ANALYSIS_SHORT_SIDE;
+      height = Math.max(1, Math.round(width / aspect));
+    }
+    const shortSide = Math.min(width, height);
+    const image = sample(width, height);
+    const data = image.data;
+    const count = width * height;
+    const tone = luminancePlane(image);
+
+    const whole = () => {
+      const mask = new Uint8Array(count).fill(1);
+      const found = largestSquare(mask, width, height);
+      return {
+        width, height, mask, soft: null, tone, side: found.side, coverage: 1, detected: "none",
+        square: found.square, bbox: { x: 0, y: 0, width, height }
+      };
+    };
+    if (mode === "whole") return whole();
+
+    let mask;
+    let detected;
+    let transparent = 0;
+    for (let i = 0; i < count; i += 1) if (data[i * 4 + 3] < 128) transparent += 1;
+
+    if (transparent > count * 0.02) {
+      mask = new Uint8Array(count);
+      for (let i = 0; i < count; i += 1) mask[i] = data[i * 4 + 3] >= 128 ? 1 : 0;
+      detected = "alpha";
+    } else {
+      const band = Math.max(2, Math.round(shortSide * 0.03));
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let n = 0;
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          if (!isBorder(x, y, width, height, band)) continue;
+          const p = (y * width + x) * 4;
+          r += data[p];
+          g += data[p + 1];
+          b += data[p + 2];
+          n += 1;
+        }
+      }
+      r /= n;
+      g /= n;
+      b /= n;
+      const distance = new Float32Array(count);
+      let spread = 0;
+      for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+          const idx = y * width + x;
+          const p = idx * 4;
+          distance[idx] = Math.hypot(data[p] - r, data[p + 1] - g, data[p + 2] - b);
+          if (isBorder(x, y, width, height, band)) spread += distance[idx];
+        }
+      }
+      spread /= n;
+      if (spread > config.backgroundTolerance * 0.6) return whole();
+      const tolerance = config.backgroundTolerance;
+      const background = floodFrom(
+        (x, y) => isBorder(x, y, width, height, band),
+        (idx) => distance[idx] < tolerance,
+        width, height
+      );
+      mask = new Uint8Array(count);
+      for (let i = 0; i < count; i += 1) mask[i] = background[i] ? 0 : 1;
+      detected = "edges";
+    }
+
+    removeSpecks(mask, width, height, Math.round(count * 0.015));
+    const outside = floodFrom(
+      (x, y) => isBorder(x, y, width, height, 1),
+      (idx) => !mask[idx],
+      width, height
+    );
+    let area = 0;
+    for (let i = 0; i < count; i += 1) {
+      mask[i] = outside[i] ? 0 : 1;
+      area += mask[i];
+    }
+    const coverage = area / count;
+    if (coverage < config.minSilhouette || coverage > config.maxSilhouette) return whole();
+
+    const found = largestSquare(mask, width, height);
+    return {
+      width, height, mask, soft: blurMask(mask, width, height), tone, side: found.side, coverage, detected,
+      square: found.square,
+      bbox: boundingBox(mask, width, height)
+    };
+  }
+
+  /*
+   * Among all squares of side `s` that fit inside the silhouette, picks the one
+   * that is closest to the centre of the shape, sits on picture content rather
+   * than blank areas (especially at its corners, where the finder squares go),
+   * and whose tone and texture hide the code best.
+   */
+  function bestSquare(analysis, s) {
+    const { width, height, side, tone, mask } = analysis;
+    const P = config.placement;
+    if (s < 1) return null;
+    const W1 = width + 1;
+    const sum = new Float64Array(W1 * (height + 1));
+    const sumSq = new Float64Array(W1 * (height + 1));
+    const blank = new Float64Array(W1 * (height + 1));
+    let cx = 0;
+    let cy = 0;
+    let area = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const idx = y * width + x;
+        const t = tone[idx];
+        const here = (y + 1) * W1 + x + 1;
+        sum[here] = t + sum[here - 1] + sum[here - W1] - sum[here - W1 - 1];
+        sumSq[here] = t * t + sumSq[here - 1] + sumSq[here - W1] - sumSq[here - W1 - 1];
+        const isBlank = (!mask[idx] || t > P.blankTone) ? 1 : 0;
+        blank[here] = isBlank + blank[here - 1] + blank[here - W1] - blank[here - W1 - 1];
+        if (mask[idx] && t <= P.blankTone) {
+          cx += x;
+          cy += y;
+          area += 1;
+        }
+      }
+    }
+    cx = area ? cx / area : width / 2;
+    cy = area ? cy / area : height / 2;
+    const shortSide = Math.min(width, height);
+    const boxSum = (table, x0, y0, w, h) =>
+      table[(y0 + h) * W1 + x0 + w] - table[y0 * W1 + x0 + w] - table[(y0 + h) * W1 + x0] + table[y0 * W1 + x0];
+
+    const squareArea = s * s;
+    const patch = Math.max(2, Math.round(s * P.cornerPatch));
+    const patchArea = patch * patch;
+    let best = null;
+    let bestScore = -Infinity;
+    for (let y = s - 1; y < height; y += 1) {
+      for (let x = s - 1; x < width; x += 1) {
+        if (side[y * width + x] < s) continue;
+        const x0 = x - s + 1;
+        const y0 = y - s + 1;
+        const mean = boxSum(sum, x0, y0, s, s) / squareArea;
+        const variance = boxSum(sumSq, x0, y0, s, s) / squareArea - mean * mean;
+        const texture = Math.sqrt(Math.max(0, variance));
+        const blankShare = boxSum(blank, x0, y0, s, s) / squareArea;
+        const cornerBlank = Math.max(
+          boxSum(blank, x0, y0, patch, patch),
+          boxSum(blank, x0 + s - patch, y0, patch, patch),
+          boxSum(blank, x0, y0 + s - patch, patch, patch),
+          boxSum(blank, x0 + s - patch, y0 + s - patch, patch, patch)
+        ) / patchArea;
+        const distance = Math.hypot(x0 + s / 2 - cx, y0 + s / 2 - cy) / shortSide;
+        let score = -P.centre * distance
+          - P.blank * blankShare
+          - P.tone * Math.abs(mean - P.idealTone)
+          + P.texture * texture;
+        if (cornerBlank > P.cornerBlankMax) score -= P.cornerPenalty;
+        if (score > bestScore) {
+          bestScore = score;
+          best = { x: x0, y: y0, side: s };
+        }
+      }
+    }
+    return best;
+  }
+
+  /* ---------- layout ---------- */
 
   function containRect(boxW, boxH, aspect) {
     let width;
@@ -144,36 +489,57 @@
     return { x: Math.round((boxW - width) / 2), y: Math.round((boxH - height) / 2), width, height };
   }
 
+  function clamp(value, low, high) {
+    return Math.min(high, Math.max(low, value));
+  }
+
   function plan(options) {
-    const { style, size, position, aspect, minVersion } = options;
+    const { style, size, hiding, aspect, minVersion, analysis } = options;
     if (style === "like") {
+      const quiet = config.quietLike;
       const version = Math.max(minVersion, LIKE_VERSION);
       const modules = version * 4 + 17;
-      const side = (modules + QUIET * 2) * SUB;
-      const origin = QUIET * SUB;
+      const side = (modules + quiet * 2) * SUB;
+      const origin = quiet * SUB;
       let picture;
       if (size === "medium") {
         picture = coverRect(side, side, aspect);
       } else {
-        const box = Math.round(modules * SUB * STYLES.like.small.picture);
+        const box = Math.round(modules * SUB * LIKE_PICTURE.small);
         picture = containRect(box, box, aspect);
         picture.x += Math.round((side - box) / 2);
         picture.y += Math.round((side - box) / 2);
       }
       return {
-        style, size, version, modules,
+        style, size, version, modules, quiet,
         width: side, height: side, qx: origin, qy: origin,
-        picture, ringOuter: config.ringOuterLike, feather: 0
+        picture, ringOuter: config.ringOuterLike, feather: 0, spill: false
       };
     }
 
-    const span = STYLES.inside[size].span;
-    const wantedModules = (config.insideShortSide * span) / SUB - QUIET * 2;
-    const wanted = Math.round((wantedModules - 17) / 4);
-    const version = Math.min(40, Math.max(minVersion, wanted, 1));
+    const quiet = config.quietInside;
+    const shortA = Math.min(analysis.width, analysis.height);
+    const factor = config.hiding[hiding] || config.hiding.balanced;
+    let square;
+    let spill = false;
+    if (analysis.detected !== "none" && analysis.square.side / shortA < config.minSquare) {
+      const bbox = analysis.bbox;
+      const side = Math.max(bbox.width, bbox.height);
+      square = { x: bbox.x + (bbox.width - side) / 2, y: bbox.y + (bbox.height - side) / 2, side };
+      spill = true;
+    } else {
+      const s = Math.max(1, Math.round(analysis.square.side * SHARE[size]));
+      square = bestSquare(analysis, s) || analysis.square;
+    }
+    const span = square.side / shortA;
+    const wantedModules = ((config.targetShortSide * span) / SUB) * factor;
+    const version = clamp(Math.round((wantedModules - 17) / 4), Math.max(1, minVersion), 40);
     const modules = version * 4 + 17;
-    const spanPx = (modules + QUIET * 2) * SUB;
-    const short = Math.ceil(spanPx / span);
+    let short = Math.ceil((modules * SUB) / span);
+    if (short > config.maxShortSide) {
+      short = config.maxShortSide;
+      spill = true;
+    }
     let width;
     let height;
     if (aspect >= 1) {
@@ -183,39 +549,31 @@
       width = short;
       height = Math.round(short / aspect);
     }
+    const scale = short / shortA;
     const codePx = modules * SUB;
-    const margin = (QUIET + 1) * SUB;
-    let qx = Math.round((width - codePx) / 2);
-    let qy = Math.round((height - codePx) / 2);
-    if (position === "top-left" || position === "bottom-left") qx = margin;
-    if (position === "top-right" || position === "bottom-right") qx = width - margin - codePx;
-    if (position === "top-left" || position === "top-right") qy = margin;
-    if (position === "bottom-left" || position === "bottom-right") qy = height - margin - codePx;
+    const cx = (square.x + square.side / 2) * scale;
+    const cy = (square.y + square.side / 2) * scale;
+    const qx = clamp(Math.round(cx - codePx / 2), 0, Math.max(0, width - codePx));
+    const qy = clamp(Math.round(cy - codePx / 2), 0, Math.max(0, height - codePx));
     return {
-      style, size, version, modules,
+      style, size, version, modules, quiet,
       width, height, qx, qy,
       picture: { x: 0, y: 0, width, height },
-      ringOuter: config.ringOuterInside, feather: config.featherModules * SUB
+      ringOuter: config.ringOuterInside, feather: config.featherModules * SUB, spill
     };
   }
 
-  function luminancePlane(image) {
-    const { width, height, data } = image;
-    const gray = new Float32Array(width * height);
-    for (let i = 0, p = 0; i < gray.length; i += 1, p += 4) {
-      const a = data[p + 3] / 255;
-      const r = data[p] * a + 255 * (1 - a);
-      const g = data[p + 1] * a + 255 * (1 - a);
-      const b = data[p + 2] * a + 255 * (1 - a);
-      gray[i] = (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255;
-    }
-    return gray;
-  }
+  /* ---------- tone ---------- */
 
-  function autoLevels(gray) {
+  function autoLevels(gray, weight) {
     const bins = new Uint32Array(256);
-    for (let i = 0; i < gray.length; i += 1) bins[Math.round(gray[i] * 255)] += 1;
-    const total = gray.length;
+    let total = 0;
+    for (let i = 0; i < gray.length; i += 1) {
+      if (weight && weight[i] < 0.5) continue;
+      bins[Math.round(gray[i] * 255)] += 1;
+      total += 1;
+    }
+    if (!total) return;
     let lo = 0;
     let hi = 255;
     let seen = 0;
@@ -237,9 +595,10 @@
   }
 
   function ringFactor(distance, layout) {
-    const ring = QUIET * SUB;
+    const ring = layout.quiet * SUB;
     if (distance <= 0) return 0;
     if (distance <= ring) {
+      if (ring <= 1) return config.ringInner;
       return config.ringInner + (layout.ringOuter - config.ringInner) * ((distance - 1) / (ring - 1));
     }
     if (layout.feather > 0 && distance <= ring + layout.feather) {
@@ -254,6 +613,35 @@
     const dy = Math.max(layout.qy - y, y - (layout.qy + codePx - 1), 0);
     return Math.max(dx, dy);
   }
+
+  /* True when (x, y) lies beside one of the three finder patterns (8 modules plus one extra). */
+  function nearFinder(x, y, layout) {
+    const zone = 9 * SUB;
+    const codePx = layout.modules * SUB;
+    const left = x < layout.qx + zone;
+    const right = x >= layout.qx + codePx - zone;
+    const top = y < layout.qy + zone;
+    const bottom = y >= layout.qy + codePx - zone;
+    return (left && top) || (right && top) || (left && bottom);
+  }
+
+  function sampleMask(analysis, u, v) {
+    // bilinear lookup of the soft silhouette mask; u, v in analysis pixel units
+    const { width, height, soft } = analysis;
+    const x = clamp(u - 0.5, 0, width - 1);
+    const y = clamp(v - 0.5, 0, height - 1);
+    const x0 = Math.floor(x);
+    const y0 = Math.floor(y);
+    const x1 = Math.min(width - 1, x0 + 1);
+    const y1 = Math.min(height - 1, y0 + 1);
+    const fx = x - x0;
+    const fy = y - y0;
+    const top = soft[y0 * width + x0] * (1 - fx) + soft[y0 * width + x1] * fx;
+    const bottom = soft[y1 * width + x0] * (1 - fx) + soft[y1 * width + x1] * fx;
+    return top * (1 - fy) + bottom * fy;
+  }
+
+  /* ---------- dithering ---------- */
 
   function dither(target, constraints, width, height) {
     const work = Float32Array.from(target);
@@ -296,40 +684,54 @@
 
   /*
    * options:
-   *   qrcode   - the qrcode-generator factory
-   *   text     - data to encode
-   *   style    - "inside" (code woven into the picture) | "like" (code is the picture)
-   *   size     - "small" | "medium"
-   *   position - for "inside": center | top-left | top-right | bottom-left | bottom-right
-   *   ink      - "mono" | "color"
-   *   aspect   - picture width / height
-   *   sample   - function(width, height) -> { width, height, data(RGBA) }
+   *   qrcode     - the qrcode-generator factory
+   *   text       - data to encode
+   *   style      - "inside" (code hidden in the picture) | "like" (code is the picture)
+   *   size       - "small" | "medium"
+   *   hiding     - "easy" | "balanced" | "hidden" (inside only)
+   *   silhouette - "auto" | "whole"
+   *   ink        - "mono" | "color"
+   *   aspect     - picture width / height
+   *   sample     - function(width, height) -> { width, height, data(RGBA) }
    */
   function render(options) {
     const style = options.style === "like" ? "like" : "inside";
     const size = options.size === "medium" ? "medium" : "small";
+    const hiding = config.hiding[options.hiding] ? options.hiding : "balanced";
+    const aspect = options.aspect > 0 ? options.aspect : 1;
     const minVersion = versionFor(options.qrcode, options.text);
-    const layout = plan({
-      style, size,
-      position: options.position || "center",
-      aspect: options.aspect > 0 ? options.aspect : 1,
-      minVersion
-    });
+    const analysis = analyse(options.sample, aspect, options.silhouette === "whole" ? "whole" : "auto");
+    const layout = plan({ style, size, hiding, aspect, minVersion, analysis });
     const code = makeCode(options.qrcode, options.text, layout.version);
-    const fmap = functionMap(layout.version);
+    const solid = solidMap(layout.version, style === "like" || config.solidAllAlignment);
     const { width, height, modules, qx, qy } = layout;
     const count = width * height;
 
     const picture = options.sample(layout.picture.width, layout.picture.height);
+    const pw = picture.width;
+    const ph = picture.height;
+    const px = layout.picture.x;
+    const py = layout.picture.y;
+
+    // silhouette weight per picture pixel (1 inside the shape, 0 outside)
+    let weight = null;
+    if (analysis.soft) {
+      weight = new Float32Array(pw * ph);
+      const su = analysis.width / pw;
+      const sv = analysis.height / ph;
+      for (let y = 0; y < ph; y += 1) {
+        for (let x = 0; x < pw; x += 1) {
+          weight[y * pw + x] = sampleMask(analysis, (x + 0.5) * su, (y + 0.5) * sv);
+        }
+      }
+    }
+
     const gray = luminancePlane(picture);
-    autoLevels(gray);
+    autoLevels(gray, weight);
 
     const target = new Float32Array(count).fill(1);
     const color = options.ink === "color" ? new Float32Array(count * 3).fill(1) : null;
-    const px = layout.picture.x;
-    const py = layout.picture.y;
-    const pw = picture.width;
-    for (let y = 0; y < picture.height; y += 1) {
+    for (let y = 0; y < ph; y += 1) {
       const ty = y + py;
       if (ty < 0 || ty >= height) continue;
       for (let x = 0; x < pw; x += 1) {
@@ -337,10 +739,12 @@
         if (tx < 0 || tx >= width) continue;
         const src = y * pw + x;
         const dst = ty * width + tx;
-        target[dst] = Math.pow(gray[src], config.gamma);
+        const w = weight ? weight[src] : 1;
+        const tone = Math.pow(gray[src], config.gamma);
+        target[dst] = 1 - (1 - tone) * w;
         if (color) {
           const p = src * 4;
-          const a = picture.data[p + 3] / 255;
+          const a = (picture.data[p + 3] / 255) * w;
           color[dst * 3] = (picture.data[p] * a + 255 * (1 - a)) / 255;
           color[dst * 3 + 1] = (picture.data[p + 1] * a + 255 * (1 - a)) / 255;
           color[dst * 3 + 2] = (picture.data[p + 2] * a + 255 * (1 - a)) / 255;
@@ -348,28 +752,30 @@
       }
     }
 
-    const ringReach = QUIET * SUB + layout.feather;
+    const ringReach = Math.ceil(layout.quiet * SUB + layout.feather);
     const x0 = Math.max(0, qx - ringReach);
     const x1 = Math.min(width, qx + modules * SUB + ringReach);
     const y0 = Math.max(0, qy - ringReach);
     const y1 = Math.min(height, qy + modules * SUB + ringReach);
+    const finderOnly = style === "inside" && config.ringFinderOnly;
     for (let y = y0; y < y1; y += 1) {
       for (let x = x0; x < x1; x += 1) {
         const k = ringFactor(distanceToCode(x, y, layout), layout);
         if (k <= 0) continue;
+        if (finderOnly && !nearFinder(x, y, layout)) continue;
         const idx = y * width + x;
         target[idx] = 1 - (1 - target[idx]) * (1 - k);
       }
     }
 
-    // constraints: 255 free, 0/1 forced centre dot (error diffused), 2/3 solid function module
+    // constraints: 255 free, 0/1 forced centre dot (error diffused), 2/3 solid module
     const constraints = new Uint8Array(count).fill(255);
     for (let r = 0; r < modules; r += 1) {
       for (let c = 0; c < modules; c += 1) {
         const dark = code.isDark(r, c);
         const bx = qx + c * SUB;
         const by = qy + r * SUB;
-        if (fmap[r * modules + c]) {
+        if (solid[r * modules + c]) {
           const rule = dark ? 2 : 3;
           for (let dy = 0; dy < SUB; dy += 1) {
             for (let dx = 0; dx < SUB; dx += 1) constraints[(by + dy) * width + bx + dx] = rule;
@@ -389,7 +795,15 @@
     }
 
     const bits = dither(target, constraints, width, height);
-    return { width, height, bits, color, layout, version: layout.version, modules, scale: SUB };
+    return {
+      width, height, bits, color, layout, modules,
+      version: layout.version,
+      hiding,
+      silhouette: analysis.detected,
+      coverage: analysis.coverage,
+      spill: layout.spill,
+      scale: SUB
+    };
   }
 
   function toRGBA(result, out) {
@@ -423,8 +837,8 @@
 
   function suggestedScale(result, maxSide) {
     const longest = Math.max(result.width, result.height);
-    return Math.max(2, Math.min(8, Math.floor((maxSide || 2600) / longest)));
+    return Math.max(2, Math.min(8, Math.floor((maxSide || 3000) / longest)));
   }
 
-  return { render, toRGBA, suggestedScale, functionMap, plan, config, SUB, QUIET, LEVEL };
+  return { render, toRGBA, suggestedScale, analyse, solidMap, plan, config, SUB, LEVEL };
 });

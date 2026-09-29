@@ -1,16 +1,16 @@
-const OUTPUT_MAX_SIDE = 2600;
+const OUTPUT_MAX_SIDE = 3000;
 
 const MODE_LABELS = {
   plain: "Text only",
-  inside: "QR inside the picture",
+  inside: "Hidden in the picture",
   like: "Looks like the picture"
 };
 
 const SIZE_HINTS = {
   locked: "Add a picture to choose small or medium.",
   inside: {
-    small: "A small code woven into the picture, about two fifths of its shorter side.",
-    medium: "A larger code, about two thirds of the picture’s shorter side."
+    small: "A smaller code, tucked deeper inside the shape. Harder to spot, needs to be shown a little larger.",
+    medium: "The largest code that fits inside the shape."
   },
   like: {
     small: "The picture sits in the middle of the code, with the plain dot pattern around it.",
@@ -18,9 +18,22 @@ const SIZE_HINTS = {
   }
 };
 
+const HIDING_HINTS = {
+  easy: "Bigger squares that scan from further away, but easier to spot.",
+  balanced: "A finer code with smaller corner squares. Show it at a decent size.",
+  hidden: "The finest code and the smallest corner squares. Show or print it large."
+};
+
+const SILHOUETTE_NOTES = {
+  alpha: "The transparent part of the PNG is the outside. The code sits inside the picture’s shape.",
+  edges: "Silhouette found from the plain background. The code sits inside the picture’s shape.",
+  none: "No plain background found, so the whole picture is the shape. For a cut-out, remove the background first (Windows Paint has a Remove background button) and upload the PNG."
+};
+
+const SCAN_TIP = "Show or print it large enough that the code is at least 5 cm across.";
+
 const STATUS = {
-  plain: "Code ready. Add a picture to weave the code into it.",
-  inside: "The code is woven into the picture. Show or print it large enough that the code is at least 5 cm across.",
+  plain: "Code ready. Add a picture to hide the code in it.",
   like: "The whole picture is the code. Show or print it large: aim for at least 10 cm across when scanning."
 };
 
@@ -109,8 +122,12 @@ class PictureQR {
     return this.choice("ink", "mono");
   }
 
-  position() {
-    return document.getElementById("position").value || "center";
+  hiding() {
+    return this.choice("hiding", "balanced");
+  }
+
+  silhouette() {
+    return document.getElementById("silhouette").value || "auto";
   }
 
   style() {
@@ -127,7 +144,8 @@ class PictureQR {
     const style = locked ? "locked" : this.style();
     const hint = style === "locked" ? SIZE_HINTS.locked : SIZE_HINTS[style][this.size()];
     document.getElementById("sizeHint").textContent = hint;
-    document.getElementById("positionField").hidden = style !== "inside";
+    document.getElementById("hidingField").hidden = style === "like";
+    document.getElementById("hidingHint").textContent = HIDING_HINTS[this.hiding()];
   }
 
   setStatus(message, isError) {
@@ -220,12 +238,12 @@ class PictureQR {
 
     const style = this.style();
     const size = this.size();
-    let meta;
+    let outcome;
     try {
       if (style === "plain") {
-        meta = this.drawPlain(text);
+        outcome = this.drawPlain(text);
       } else {
-        meta = this.drawHalftone(text, style, size);
+        outcome = this.drawHalftone(text, style, size);
       }
     } catch (error) {
       this.clearPreview();
@@ -238,9 +256,9 @@ class PictureQR {
     document.getElementById("empty").hidden = true;
     document.getElementById("stage").classList.add("has-code");
     document.getElementById("downloadBtn").disabled = false;
-    document.getElementById("previewMeta").textContent = meta;
+    document.getElementById("previewMeta").textContent = outcome.meta;
     document.getElementById("encoded").textContent = text;
-    this.setStatus(STATUS[style], false);
+    this.setStatus(outcome.status, false);
   }
 
   clearPreview() {
@@ -273,7 +291,7 @@ class PictureQR {
         }
       }
     }
-    return `${MODE_LABELS.plain} · ${count} × ${count} modules`;
+    return { meta: `${MODE_LABELS.plain} · ${count} × ${count} modules`, status: STATUS.plain };
   }
 
   drawHalftone(text, style, size) {
@@ -285,7 +303,8 @@ class PictureQR {
       text,
       style,
       size,
-      position: this.position(),
+      hiding: this.hiding(),
+      silhouette: this.silhouette(),
       ink: this.ink(),
       aspect: width / height,
       sample: makeSampler(picture)
@@ -305,7 +324,16 @@ class PictureQR {
     ctx.drawImage(small, 0, 0, this.canvas.width, this.canvas.height);
 
     const sizeName = size === "medium" ? "Medium" : "Small";
-    return `${sizeName} · ${MODE_LABELS[style]} · ${result.modules} × ${result.modules} modules`;
+    const meta = `${sizeName} · ${MODE_LABELS[style]} · ${result.modules} × ${result.modules} modules`;
+    if (style === "like") return { meta, status: STATUS.like };
+    let status = SILHOUETTE_NOTES[result.silhouette] || SILHOUETTE_NOTES.none;
+    if (this.silhouette() === "whole") status = "The whole picture is the shape.";
+    if (result.spill && result.silhouette !== "none") {
+      status = "The shape is too thin for a code to fit inside, so the code spans it. " + SCAN_TIP;
+    } else {
+      status += " " + SCAN_TIP;
+    }
+    return { meta, status };
   }
 
   download() {
@@ -342,8 +370,6 @@ function makeSampler(picture) {
     canvas.width = width;
     canvas.height = height;
     const ctx = canvas.getContext("2d", { willReadFrequently: true });
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, width, height);
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(source, 0, 0, width, height);
